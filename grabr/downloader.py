@@ -198,7 +198,7 @@ def _download_youtube_track(
         track.file_path = str(expected_path)
         return track
 
-    def _run_download() -> None:
+    def _run_download(include_lyrics: bool) -> None:
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": str(output_dir / "%(title).180s [%(id)s].%(ext)s"),
@@ -216,7 +216,7 @@ def _download_youtube_track(
         }
         if config.embed_cover:
             ydl_opts["postprocessors"].append({"key": "EmbedThumbnail"})
-        if config.download_lyrics:
+        if include_lyrics:
             ydl_opts["writesubtitles"] = True
             ydl_opts["writeautomaticsub"] = True
             ydl_opts["subtitleslangs"] = ["en", "en.*"]
@@ -227,14 +227,32 @@ def _download_youtube_track(
 
     try:
         with_retry(
-            _run_download,
+            lambda: _run_download(config.download_lyrics),
             retries=config.retry_count,
             backoff_seconds=config.backoff_seconds,
         )
     except Exception as exc:  # noqa: BLE001
-        track.status = "failed"
-        track.error = str(exc)
-        return track
+        message = str(exc).lower()
+        subtitle_issue = "subtitle" in message and (
+            "too many requests" in message
+            or "http error 429" in message
+            or "unable to download" in message
+        )
+        if config.download_lyrics and subtitle_issue:
+            try:
+                with_retry(
+                    lambda: _run_download(False),
+                    retries=config.retry_count,
+                    backoff_seconds=config.backoff_seconds,
+                )
+            except Exception as fallback_exc:  # noqa: BLE001
+                track.status = "failed"
+                track.error = str(fallback_exc)
+                return track
+        else:
+            track.status = "failed"
+            track.error = str(exc)
+            return track
 
     if file_exists(expected_path):
         track.file_path = str(expected_path)
