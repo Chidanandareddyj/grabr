@@ -17,6 +17,7 @@ grabr <url>
 grabr <url> --format flac
 grabr <url> --output ~/Downloads
 grabr <url> --no-cover
+grabr <url> --no-lyrics
 grabr --version
 grabr --help
 ```
@@ -31,12 +32,13 @@ grabr --help
 
 ## Notes
 
-- Downloads are audio-only and default to MP3 320kbps.
+- Downloads are audio-only and default to MP3 (source/provider default bitrate).
 - Default output directory: `~/Music/grabr`.
 - YouTube playlist links create a subfolder named after the playlist.
 - Spotify album/playlist links create a subfolder named after the collection when available.
 - Duplicate files are skipped when detected.
 - Playlist and album operations run with up to 3 concurrent downloads.
+- Lyrics sidecar files are downloaded by default when providers expose them (`.lrc` for Spotify via spotdl, subtitle sidecars for YouTube via yt-dlp).
 
 ## Troubleshooting
 

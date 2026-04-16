@@ -36,11 +36,12 @@ Keep CLI coupling out of core modules; preserve this separation for future Andro
 
 ## Current Behavioral Notes
 
-- YouTube downloads set `preferredquality=320` for MP3 extraction.
+- YouTube downloads use provider/source default audio quality for the selected format.
 - YouTube playlist downloads are written into a playlist-named subfolder under the selected output directory.
 - Spotify album/playlist downloads are written into a collection-named subfolder when metadata includes collection names.
 - Spotify downloads force `spotdl --audio youtube` to avoid environments blocked by YouTube Music.
-- Spotify downloads explicitly pass `--bitrate 320k` for consistent default quality.
+- Spotify downloads use provider/source default audio quality for the selected format.
+- Lyrics are enabled by default (`spotdl --lyrics ... --generate-lrc` and yt-dlp subtitle sidecars) and can be disabled with `--no-lyrics`.
 
 ## Session Continuity
 

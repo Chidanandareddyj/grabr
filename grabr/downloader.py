@@ -30,6 +30,7 @@ class DownloadConfig:
     format: str = "mp3"
     output_dir: str = "~/Music/grabr"
     embed_cover: bool = True
+    download_lyrics: bool = True
     max_concurrent: int = 3
     retry_count: int = 1
     backoff_seconds: float = 1.5
@@ -207,7 +208,6 @@ def _download_youtube_track(
                 {
                     "key": "FFmpegExtractAudio",
                     "preferredcodec": config.format,
-                    "preferredquality": "320",
                 },
                 {"key": "FFmpegMetadata"},
             ],
@@ -216,6 +216,11 @@ def _download_youtube_track(
         }
         if config.embed_cover:
             ydl_opts["postprocessors"].append({"key": "EmbedThumbnail"})
+        if config.download_lyrics:
+            ydl_opts["writesubtitles"] = True
+            ydl_opts["writeautomaticsub"] = True
+            ydl_opts["subtitleslangs"] = ["en", "en.*"]
+            ydl_opts["subtitlesformat"] = "best"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
@@ -406,11 +411,12 @@ def _download_spotify_song(
         "skip",
         "--audio",
         "youtube",
-        "--bitrate",
-        "320k",
         "--max-retries",
         "0",
     ]
+    if config.download_lyrics:
+        cmd.extend(["--lyrics", "synced", "musixmatch", "genius", "azlyrics"])
+        cmd.append("--generate-lrc")
 
     def _run() -> None:
         _run_stream_command_checked(cmd, "spotdl download")

@@ -55,8 +55,20 @@ def _render_summary(result: DownloadResult) -> None:
     default=False,
     help="Skip cover art embedding.",
 )
+@click.option(
+    "--no-lyrics",
+    is_flag=True,
+    default=False,
+    help="Skip lyric/caption sidecar downloads.",
+)
 @click.version_option(__version__, prog_name="grabr")
-def main(url: str | None, audio_format: str, output_dir: str, no_cover: bool) -> None:
+def main(
+    url: str | None,
+    audio_format: str,
+    output_dir: str,
+    no_cover: bool,
+    no_lyrics: bool,
+) -> None:
     """Download audio from YouTube Music and Spotify URLs."""
     if not url:
         raise click.UsageError("Missing URL. Use: grabr <url>")
@@ -65,6 +77,7 @@ def main(url: str | None, audio_format: str, output_dir: str, no_cover: bool) ->
         format=audio_format.lower(),
         output_dir=output_dir,
         embed_cover=not no_cover,
+        download_lyrics=not no_lyrics,
     )
 
     total_tracks = 1
