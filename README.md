@@ -33,6 +33,8 @@ grabr --help
 
 - Downloads are audio-only and default to MP3 320kbps.
 - Default output directory: `~/Music/grabr`.
+- YouTube playlist links create a subfolder named after the playlist.
+- Spotify album/playlist links create a subfolder named after the collection when available.
 - Duplicate files are skipped when detected.
 - Playlist and album operations run with up to 3 concurrent downloads.
 

@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from .detector import DetectedUrl, ItemType, Source, detect_url
 from .utils import (
@@ -136,7 +137,12 @@ def _download_youtube(
             )
         return result
 
-    entries = _extract_playlist_entries(detected.normalized_url)
+    collection_title, entries = _extract_youtube_collection(detected.normalized_url)
+    target_output_dir = _collection_output_dir(
+        output_dir,
+        collection_title,
+        "youtube_playlist",
+    )
     total = len(entries)
     if progress:
         progress("playlist_start", {"total": total})
@@ -146,7 +152,7 @@ def _download_youtube(
             executor.submit(
                 _download_youtube_track,
                 entry["url"],
-                output_dir,
+                target_output_dir,
                 config,
                 entry.get("title"),
                 entry.get("id"),
@@ -263,7 +269,7 @@ def _extract_track_info(url: str) -> dict:
         return ydl.extract_info(url, download=False)
 
 
-def _extract_playlist_entries(url: str) -> list[dict]:
+def _extract_youtube_collection(url: str) -> tuple[str | None, list[dict]]:
     yt_dlp = importlib.import_module("yt_dlp")
     with yt_dlp.YoutubeDL(
         {"quiet": True, "extract_flat": True, "no_warnings": True}
@@ -284,7 +290,14 @@ def _extract_playlist_entries(url: str) -> list[dict]:
                 "url": f"https://www.youtube.com/watch?v={entry_id}",
             }
         )
-    return parsed
+    return info.get("title"), parsed
+
+
+def _collection_output_dir(base_dir: Path, name: str | None, fallback: str) -> Path:
+    folder = sanitize_filename(name or fallback)
+    path = base_dir / folder
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _download_spotify(
@@ -323,6 +336,16 @@ def _download_spotify(
         return result
 
     songs = _read_spotdl_save_file(save_file)
+    target_output_dir = output_dir
+    if detected.item_type in {ItemType.PLAYLIST, ItemType.ALBUM}:
+        collection_title = _spotify_collection_title(detected.item_type, songs)
+        fallback = _spotify_collection_fallback(
+            detected.normalized_url, detected.item_type
+        )
+        target_output_dir = _collection_output_dir(
+            output_dir, collection_title, fallback
+        )
+
     total = max(1, len(songs))
     if progress:
         progress("playlist_start", {"total": total})
@@ -332,7 +355,9 @@ def _download_spotify(
 
     with ThreadPoolExecutor(max_workers=min(config.max_concurrent, 3)) as executor:
         futures = {
-            executor.submit(_download_spotify_song, song, output_dir, config): song
+            executor.submit(
+                _download_spotify_song, song, target_output_dir, config
+            ): song
             for song in songs
         }
         completed = 0
@@ -440,6 +465,38 @@ def _read_spotdl_save_file(save_file: Path) -> list[dict]:
     if isinstance(parsed, list):
         return [entry for entry in parsed if isinstance(entry, dict)]
     return []
+
+
+def _spotify_collection_title(item_type: ItemType, songs: list[dict]) -> str | None:
+    if item_type is ItemType.ALBUM:
+        candidates = ("album_name", "album")
+    elif item_type is ItemType.PLAYLIST:
+        candidates = (
+            "playlist_name",
+            "playlist",
+            "list_name",
+            "collection_name",
+        )
+    else:
+        return None
+
+    for song in songs:
+        for key in candidates:
+            value = song.get(key)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned:
+                    return cleaned
+    return None
+
+
+def _spotify_collection_fallback(url: str, item_type: ItemType) -> str:
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    item = item_type.value
+    if len(parts) >= 2 and parts[0].lower() == item:
+        return f"spotify_{item}_{parts[1][:8]}"
+    return f"spotify_{item}"
 
 
 def _run_stream_command_checked(command: list[str], context: str) -> None:
