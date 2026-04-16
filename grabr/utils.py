@@ -75,9 +75,18 @@ def run_command_stream(
         text=True,
     )
     assert process.stdout is not None
-    for line in process.stdout:
-        if on_line:
-            on_line(line.rstrip("\n"))
+    try:
+        for line in process.stdout:
+            if on_line:
+                on_line(line.rstrip("\n"))
+    except Exception:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
     return process.wait()
 
 

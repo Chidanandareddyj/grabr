@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import importlib
 import tempfile
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -305,10 +306,14 @@ def _download_spotify(
         detected.normalized_url,
         "--save-file",
         str(save_file),
+        "--audio",
+        "youtube",
+        "--max-retries",
+        "0",
     ]
     try:
         with_retry(
-            lambda: run_command_stream(save_cmd),
+            lambda: _run_stream_command_checked(save_cmd, "spotdl save"),
             retries=config.retry_count,
             backoff_seconds=config.backoff_seconds,
         )
@@ -372,14 +377,18 @@ def _download_spotify_song(
         config.format,
         "--threads",
         "1",
-        "--skip-existing",
+        "--overwrite",
+        "skip",
+        "--audio",
+        "youtube",
+        "--bitrate",
+        "320k",
+        "--max-retries",
+        "0",
     ]
 
-    def _run() -> int:
-        code = run_command_stream(cmd)
-        if code != 0:
-            raise RuntimeError(f"spotdl exited with status {code}")
-        return code
+    def _run() -> None:
+        _run_stream_command_checked(cmd, "spotdl download")
 
     try:
         with_retry(
@@ -431,6 +440,36 @@ def _read_spotdl_save_file(save_file: Path) -> list[dict]:
     if isinstance(parsed, list):
         return [entry for entry in parsed if isinstance(entry, dict)]
     return []
+
+
+def _run_stream_command_checked(command: list[str], context: str) -> None:
+    tail: deque[str] = deque(maxlen=12)
+
+    class _RateLimitDetected(RuntimeError):
+        """Raised to abort long-running spotdl retries on rate limit."""
+
+    def _collect(line: str) -> None:
+        line = line.strip()
+        if line:
+            tail.append(line)
+        lowered = line.lower()
+        if "retry will occur after" in lowered or "rate/request limit" in lowered:
+            raise _RateLimitDetected(line)
+
+    try:
+        code = run_command_stream(command, on_line=_collect)
+    except _RateLimitDetected as exc:
+        raise RuntimeError(f"{context} blocked by Spotify rate limit: {exc}") from exc
+
+    if code == 0:
+        return
+
+    if tail:
+        details = "\n".join(tail)
+        raise RuntimeError(
+            f"{context} failed with status {code}. Last output:\n{details}"
+        )
+    raise RuntimeError(f"{context} failed with status {code}.")
 
 
 def _record_track_result(result: DownloadResult, track: TrackResult) -> None:
