@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .detector import DetectedUrl, ItemType, Source, detect_url
 from .utils import (
@@ -188,17 +188,20 @@ def _download_youtube_track(
     yt_dlp = importlib.import_module("yt_dlp")
     track = TrackResult(source_url=url, title=title_hint)
 
-    info = _extract_track_info(url)
-    track.title = info.get("title", title_hint)
-    video_id = info.get("id", id_hint) or "unknown"
-    expected_name = f"{_safe_title(track.title)} [{video_id}].{config.format}"
-    expected_path = output_dir / expected_name
-    if file_exists(expected_path):
-        track.status = "skipped"
-        track.file_path = str(expected_path)
-        return track
+    video_id = id_hint or _youtube_video_id(url) or "unknown"
+    if video_id != "unknown":
+        existing = sorted(
+            output_dir.glob(f"*[{video_id}].{config.format}"), reverse=True
+        )
+        if existing:
+            track.status = "skipped"
+            track.file_path = str(existing[0])
+            return track
+
+    downloaded_info: dict | None = None
 
     def _run_download(include_lyrics: bool) -> None:
+        nonlocal downloaded_info
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": str(output_dir / "%(title).180s [%(id)s].%(ext)s"),
@@ -223,7 +226,8 @@ def _download_youtube_track(
             ydl_opts["subtitlesformat"] = "best"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True)
+            info = ydl.extract_info(url, download=True)
+            downloaded_info = info if isinstance(info, dict) else None
 
     try:
         with_retry(
@@ -254,42 +258,30 @@ def _download_youtube_track(
             track.error = str(exc)
             return track
 
-    if file_exists(expected_path):
-        track.file_path = str(expected_path)
+    if isinstance(downloaded_info, dict):
+        track.title = downloaded_info.get("title") or track.title
+        video_id = downloaded_info.get("id") or video_id
+
+    candidates = sorted(output_dir.glob(f"*.{config.format}"), reverse=True)
+    matching = [
+        candidate for candidate in candidates if f"[{video_id}]" in candidate.name
+    ]
+    if matching:
+        track.file_path = str(matching[0])
     else:
-        candidates = sorted(output_dir.glob(f"*.{config.format}"), reverse=True)
-        matching = [
-            candidate for candidate in candidates if f"[{video_id}]" in candidate.name
-        ]
-        if matching:
-            track.file_path = str(matching[0])
-        else:
-            track.status = "failed"
-            track.error = "Download completed but file path could not be resolved."
-            return track
-
-    from .metadata import TrackMetadata, embed_metadata
-
-    metadata = TrackMetadata(
-        title=info.get("title"),
-        artist=info.get("artist") or info.get("uploader"),
-        album=info.get("album"),
-        thumbnail_url=info.get("thumbnail"),
-    )
-    try:
-        embed_metadata(Path(track.file_path), metadata, embed_cover=config.embed_cover)
-    except Exception:  # noqa: BLE001
-        pass
+        track.status = "failed"
+        track.error = "Download completed but file path could not be resolved."
+        return track
 
     return track
 
 
-def _extract_track_info(url: str) -> dict:
-    yt_dlp = importlib.import_module("yt_dlp")
-    with yt_dlp.YoutubeDL(
-        {"quiet": True, "noplaylist": True, "no_warnings": True}
-    ) as ydl:
-        return ydl.extract_info(url, download=False)
+def _youtube_video_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    values = parse_qs(parsed.query).get("v") or []
+    if values and values[0]:
+        return values[0]
+    return None
 
 
 def _extract_youtube_collection(url: str) -> tuple[str | None, list[dict]]:
