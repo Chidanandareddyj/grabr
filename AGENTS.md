@@ -38,7 +38,8 @@ Keep CLI coupling out of core modules; preserve this separation for future Andro
 
 - YouTube downloads use provider/source default audio quality for the selected format.
 - YouTube playlist downloads are written into a playlist-named subfolder under the selected output directory.
-- Spotify album/playlist downloads are written into a collection-named subfolder when metadata includes collection names.
+- Spotify direct link downloads (`track|album|playlist`) run through `spotdl download <spotify_url>` without requiring Spotify developer credentials.
+- If Spotify blocks `spotdl` with a rate limit for a single track URL, downloader falls back to Spotify oEmbed metadata + YouTube search (`ytsearch1`) and downloads via yt-dlp.
 - Spotify downloads force `spotdl --audio youtube` to avoid environments blocked by YouTube Music.
 - Spotify downloads use provider/source default audio quality for the selected format.
 - Lyrics are enabled by default (`spotdl --lyrics ... --generate-lrc` and yt-dlp subtitle sidecars) and can be disabled with `--no-lyrics`.

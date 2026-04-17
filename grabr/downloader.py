@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import importlib
-import tempfile
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -12,10 +10,11 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
+import requests
+
 from .detector import DetectedUrl, ItemType, Source, detect_url
 from .utils import (
     expand_output_dir,
-    file_exists,
     has_binary,
     sanitize_filename,
     run_command_stream,
@@ -65,17 +64,30 @@ SUPPORTED_FORMATS = {"mp3", "flac", "opus"}
 
 
 def check_dependencies() -> None:
-    missing: list[str] = []
-    if not has_binary("spotdl"):
-        missing.append("spotdl")
-    if not has_binary("yt-dlp"):
-        missing.append("yt-dlp")
+    missing_cli: list[str] = []
+    for tool in ("spotdl", "yt-dlp", "ffmpeg", "ffprobe"):
+        if not has_binary(tool):
+            missing_cli.append(tool)
 
-    if missing:
-        joined = ", ".join(missing)
-        raise DependencyError(
-            f"Missing required tools: {joined}. Install with: pip install spotdl yt-dlp"
-        )
+    if missing_cli:
+        lines = [f"Missing required tools on PATH: {', '.join(missing_cli)}."]
+        if any(tool in {"ffmpeg", "ffprobe"} for tool in missing_cli):
+            lines.extend(
+                [
+                    "ffmpeg and ffprobe must be system binaries (executables).",
+                    "Installing the Python package via `pip install ffmpeg` is not enough.",
+                    "Install ffmpeg for your OS and ensure its bin directory is on PATH:",
+                    "  - Windows: winget install ffmpeg",
+                    "  - macOS: brew install ffmpeg",
+                    "  - Debian/Ubuntu: sudo apt install ffmpeg",
+                    "Verify with: ffmpeg -version and ffprobe -version",
+                ]
+            )
+        if any(tool in {"spotdl", "yt-dlp"} for tool in missing_cli):
+            lines.append(
+                "Install Python CLI dependencies with: pip install spotdl yt-dlp"
+            )
+        raise DependencyError("\n".join(lines))
 
     try:
         importlib.import_module("yt_dlp")
@@ -327,90 +339,14 @@ def _download_spotify(
         url=detected.normalized_url,
     )
 
-    save_file = Path(tempfile.gettempdir()) / "grabr_spotify_list.spotdl"
-    save_cmd = [
-        "spotdl",
-        "save",
-        detected.normalized_url,
-        "--save-file",
-        str(save_file),
-        "--audio",
-        "youtube",
-        "--max-retries",
-        "0",
-    ]
-    try:
-        with_retry(
-            lambda: _run_stream_command_checked(save_cmd, "spotdl save"),
-            retries=config.retry_count,
-            backoff_seconds=config.backoff_seconds,
-        )
-    except Exception as exc:  # noqa: BLE001
-        result.failed = 1
-        result.errors.append(str(exc))
-        return result
-
-    songs = _read_spotdl_save_file(save_file)
-    target_output_dir = output_dir
-    if detected.item_type in {ItemType.PLAYLIST, ItemType.ALBUM}:
-        collection_title = _spotify_collection_title(detected.item_type, songs)
-        fallback = _spotify_collection_fallback(
-            detected.normalized_url, detected.item_type
-        )
-        target_output_dir = _collection_output_dir(
-            output_dir, collection_title, fallback
-        )
-
-    total = max(1, len(songs))
     if progress:
-        progress("playlist_start", {"total": total})
-
-    if not songs:
-        songs = [{"url": detected.normalized_url, "name": "Spotify item"}]
-
-    with ThreadPoolExecutor(max_workers=min(config.max_concurrent, 3)) as executor:
-        futures = {
-            executor.submit(
-                _download_spotify_song, song, target_output_dir, config
-            ): song
-            for song in songs
-        }
-        completed = 0
-        for future in as_completed(futures):
-            track_result = future.result()
-            _record_track_result(result, track_result)
-            completed += 1
-            if progress:
-                progress(
-                    "track_done",
-                    {
-                        "completed": completed,
-                        "total": total,
-                        "title": track_result.title,
-                        "status": track_result.status,
-                    },
-                )
-
-    return result
-
-
-def _download_spotify_song(
-    song: dict, output_dir: Path, config: DownloadConfig
-) -> TrackResult:
-    track_url = song.get("url") or song.get("song_url") or song.get("spotify_url")
-    title = song.get("name") or song.get("title") or track_url
-    track = TrackResult(source_url=track_url or "unknown", title=title)
-
-    if not track_url:
-        track.status = "failed"
-        track.error = "Invalid song entry returned by spotdl save."
-        return track
+        progress("playlist_start", {"total": 1})
 
     output_template = str(output_dir / "{title} - {artists}.{output-ext}")
     cmd = [
         "spotdl",
         "download",
-        track_url,
+        detected.normalized_url,
         "--output",
         output_template,
         "--format",
@@ -428,91 +364,223 @@ def _download_spotify_song(
         cmd.extend(["--lyrics", "synced", "musixmatch", "genius", "azlyrics"])
         cmd.append("--generate-lrc")
 
-    def _run() -> None:
-        _run_stream_command_checked(cmd, "spotdl download")
+    before = {str(path.resolve()) for path in output_dir.rglob(f"*.{config.format}")}
 
     try:
         with_retry(
-            _run, retries=config.retry_count, backoff_seconds=config.backoff_seconds
+            lambda: _run_stream_command_checked(cmd, "spotdl download"),
+            retries=config.retry_count,
+            backoff_seconds=config.backoff_seconds,
         )
     except Exception as exc:  # noqa: BLE001
-        track.status = "failed"
-        track.error = str(exc)
-        return track
-
-    safe_prefix = sanitize_filename(_safe_title(title))
-    candidates = sorted(
-        output_dir.glob(f"{safe_prefix}*.{config.format}"), reverse=True
-    )
-    if candidates:
-        track.file_path = str(candidates[0])
-        track.status = "downloaded"
-        if not config.embed_cover:
+        message_raw = str(exc)
+        message = _normalize_spotify_error(message_raw)
+        if (
+            detected.item_type is ItemType.TRACK
+            and _is_spotify_rate_limit_error(message_raw)
+        ):
             try:
-                from .metadata import remove_cover_art
+                track = _download_spotify_track_via_youtube(
+                    spotify_url=detected.normalized_url,
+                    output_dir=output_dir,
+                    config=config,
+                )
+                _record_track_result(result, track)
+                if progress:
+                    progress(
+                        "track_done",
+                        {
+                            "completed": 1,
+                            "total": 1,
+                            "title": track.title or "Spotify track (YouTube fallback)",
+                            "status": track.status,
+                        },
+                    )
+                return result
+            except Exception as fallback_exc:  # noqa: BLE001
+                message = (
+                    f"{message}\nFallback failed while mapping Spotify -> YouTube: "
+                    f"{fallback_exc}"
+                )
 
-                remove_cover_art(candidates[0])
-            except Exception:  # noqa: BLE001
-                pass
-    else:
-        track.status = "skipped"
+        result.failed = 1
+        result.errors.append(message)
+        result.tracks.append(
+            TrackResult(
+                source_url=detected.normalized_url,
+                title="Spotify item",
+                status="failed",
+                error=message,
+            )
+        )
+        if progress:
+            progress(
+                "track_done",
+                {
+                    "completed": 1,
+                    "total": 1,
+                    "title": "Spotify item",
+                    "status": "failed",
+                },
+            )
+        return result
+
+    after = sorted(output_dir.rglob(f"*.{config.format}"), reverse=True)
+    new_files = [path for path in after if str(path.resolve()) not in before]
+    if new_files:
+        for path in new_files:
+            if not config.embed_cover:
+                try:
+                    from .metadata import remove_cover_art
+
+                    remove_cover_art(path)
+                except Exception:  # noqa: BLE001
+                    pass
+            _record_track_result(
+                result,
+                TrackResult(
+                    source_url=detected.normalized_url,
+                    title=path.stem,
+                    file_path=str(path),
+                    status="downloaded",
+                ),
+            )
+        if progress:
+            progress(
+                "track_done",
+                {
+                    "completed": 1,
+                    "total": 1,
+                    "title": f"Spotify item ({len(new_files)} tracks)",
+                    "status": "downloaded",
+                },
+            )
+        return result
+
+    skipped = TrackResult(
+        source_url=detected.normalized_url,
+        title="Spotify item",
+        status="skipped",
+    )
+    _record_track_result(result, skipped)
+    if progress:
+        progress(
+            "track_done",
+            {"completed": 1, "total": 1, "title": "Spotify item", "status": "skipped"},
+        )
+
+    return result
+
+
+def _normalize_spotify_error(message: str) -> str:
+    lowered = message.lower()
+    timeout_signals = (
+        "timed out",
+        "timeout",
+        "read timed out",
+        "connecttimeout",
+        "connection aborted",
+    )
+    if any(signal in lowered for signal in timeout_signals):
+        return (
+            "Spotify provider timed out while fetching this link. "
+            "No Spotify client ID is needed for direct link downloads. "
+            "Please retry in a moment."
+        )
+    return message
+
+
+def _is_spotify_rate_limit_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        signal in lowered
+        for signal in (
+            "rate/request limit",
+            "retry will occur after",
+            "spotify rate limit",
+            "http error 429",
+        )
+    )
+
+
+def _download_spotify_track_via_youtube(
+    spotify_url: str,
+    output_dir: Path,
+    config: DownloadConfig,
+) -> TrackResult:
+    query = _spotify_oembed_track_query(spotify_url)
+    youtube_url, youtube_title = _youtube_first_result_url(query)
+    track = _download_youtube_track(
+        url=youtube_url,
+        output_dir=output_dir,
+        config=config,
+        title_hint=youtube_title,
+    )
+    track.source_url = spotify_url
     return track
 
 
-def _read_spotdl_save_file(save_file: Path) -> list[dict]:
-    if not save_file.exists():
-        return []
-    content = save_file.read_text(encoding="utf-8").strip()
-    if not content:
-        return []
+def _spotify_oembed_track_query(spotify_url: str) -> str:
+    response = requests.get(
+        "https://open.spotify.com/oembed",
+        params={"url": spotify_url},
+        timeout=12,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("Spotify oEmbed returned an invalid response.")
 
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        lines = [line for line in content.splitlines() if line.strip()]
-        songs: list[dict] = []
-        for line in lines:
-            try:
-                songs.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return songs
+    title = payload.get("title")
+    artist = payload.get("author_name")
+    if not isinstance(title, str) or not title.strip():
+        raise RuntimeError("Spotify oEmbed did not provide a track title.")
 
-    if isinstance(parsed, list):
-        return [entry for entry in parsed if isinstance(entry, dict)]
-    return []
+    title_text = title.strip()
+    if isinstance(artist, str) and artist.strip():
+        return f"{artist.strip()} - {title_text}"
 
-
-def _spotify_collection_title(item_type: ItemType, songs: list[dict]) -> str | None:
-    if item_type is ItemType.ALBUM:
-        candidates = ("album_name", "album")
-    elif item_type is ItemType.PLAYLIST:
-        candidates = (
-            "playlist_name",
-            "playlist",
-            "list_name",
-            "collection_name",
-        )
-    else:
-        return None
-
-    for song in songs:
-        for key in candidates:
-            value = song.get(key)
-            if isinstance(value, str):
-                cleaned = value.strip()
-                if cleaned:
-                    return cleaned
-    return None
+    cleaned_title = title_text
+    suffixes = (
+        " - from \"",
+        " (from \"",
+        " - remastered",
+        " (remastered",
+    )
+    lowered = title_text.lower()
+    for suffix in suffixes:
+        index = lowered.find(suffix)
+        if index > 0:
+            cleaned_title = title_text[:index].strip()
+            break
+    return cleaned_title or title_text
 
 
-def _spotify_collection_fallback(url: str, item_type: ItemType) -> str:
-    parsed = urlparse(url)
-    parts = [part for part in parsed.path.split("/") if part]
-    item = item_type.value
-    if len(parts) >= 2 and parts[0].lower() == item:
-        return f"spotify_{item}_{parts[1][:8]}"
-    return f"spotify_{item}"
+def _youtube_first_result_url(query: str) -> tuple[str, str | None]:
+    yt_dlp = importlib.import_module("yt_dlp")
+    with yt_dlp.YoutubeDL(
+        {
+            "quiet": True,
+            "extract_flat": True,
+            "no_warnings": True,
+        }
+    ) as ydl:
+        info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+
+    entries = info.get("entries") or []
+    first = entries[0] if entries else None
+    if not isinstance(first, dict):
+        raise RuntimeError("No YouTube match found for Spotify fallback query.")
+
+    video_id = first.get("id")
+    if isinstance(video_id, str) and video_id:
+        return f"https://www.youtube.com/watch?v={video_id}", first.get("title")
+
+    webpage_url = first.get("webpage_url")
+    if isinstance(webpage_url, str) and webpage_url:
+        return webpage_url, first.get("title")
+
+    raise RuntimeError("Could not resolve a YouTube URL from fallback search result.")
 
 
 def _run_stream_command_checked(command: list[str], context: str) -> None:
@@ -555,9 +623,3 @@ def _record_track_result(result: DownloadResult, track: TrackResult) -> None:
         result.failed += 1
         if track.error:
             result.errors.append(track.error)
-
-
-def _safe_title(title: str | None) -> str:
-    if not title:
-        return "unknown"
-    return " ".join(title.split()).strip()

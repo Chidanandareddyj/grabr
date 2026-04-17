@@ -1,50 +1,76 @@
 # grabr
 
-Terminal-first audio downloader for YouTube Music and Spotify links.
+Download music from YouTube Music and Spotify via CLI.
 
-## Install
+## Prerequisites
 
-After cloning:
+- Python 3.10+
+- ffmpeg
 
 ```bash
-pip install -e .
+# Windows
+winget install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Linux (Debian/Ubuntu)
+sudo apt install ffmpeg
+```
+
+`grabr` requires system `ffmpeg` and `ffprobe` executables on PATH.
+Installing `pip install ffmpeg` alone is not sufficient.
+
+You can verify your setup with:
+
+```bash
+ffmpeg -version
+ffprobe -version
+```
+
+If you see `Postprocessing: ffprobe and ffmpeg not found`, install ffmpeg for your OS
+and restart your terminal so PATH changes are applied.
+
+## Installation
+
+```bash
+pip install grabr
 ```
 
 ## Usage
 
 ```bash
-grabr <url>
-grabr <url> --format flac
-grabr <url> --output ~/Downloads
-grabr <url> --no-cover
-grabr <url> --no-lyrics
-grabr --version
-grabr --help
+grabr <url>                        # download track/playlist/album
+grabr <url> --format flac          # choose format (mp3/flac/opus)
+grabr <url> --output ~/Downloads   # custom output directory
+grabr search "query"               # search and pick interactively
+grabr search "query" --source spotify
+grabr search "query" --limit 8
 ```
 
-## Supported URLs
+Spotify link downloads do not require Spotify developer credentials.
+Paste a Spotify track/album/playlist link directly into `grabr`.
 
-- YouTube Music: `music.youtube.com/...`
-- YouTube playlist: `youtube.com/playlist?...`
-- Spotify track: `open.spotify.com/track/...`
-- Spotify album: `open.spotify.com/album/...`
-- Spotify playlist: `open.spotify.com/playlist/...`
+If Spotify rate-limits `spotdl`, `grabr` automatically falls back for single-track
+Spotify links by mapping track metadata to a YouTube search and downloading the
+best first match.
 
-## Notes
+## Spotify Search Setup
 
-- Downloads are audio-only and default to MP3 (source/provider default bitrate).
-- Default output directory: `~/Music/grabr`.
-- YouTube playlist links create a subfolder named after the playlist.
-- Spotify album/playlist links create a subfolder named after the collection when available.
-- Duplicate files are skipped when detected.
-- Playlist and album operations run with up to 3 concurrent downloads.
-- Lyrics sidecar files are downloaded by default when providers expose them (`.lrc` for Spotify via spotdl, subtitle sidecars for YouTube via yt-dlp).
+Only needed for `--source spotify`.
 
-## Troubleshooting
+- Get free credentials at developer.spotify.com
+- Set environment variables:
 
-If startup reports missing tools:
+```bash
+SPOTIFY_CLIENT_ID=your_id
+SPOTIFY_CLIENT_SECRET=your_secret
+```
 
-- Install dependencies: `pip install -r requirements.txt`
-- Ensure binaries are available in PATH:
-  - `yt-dlp`
-  - `spotdl`
+## Output
+
+Files are saved to `~/Music/grabr/` by default.
+
+## License
+
+MIT

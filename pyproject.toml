@@ -1,29 +1,38 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "grabr"
-version = "0.1.0"
-description = "Download audio from YouTube Music and Spotify links"
+version = "0.1.1"
+description = "Download music from YouTube Music and Spotify via CLI"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "grabr" }]
-dependencies = [
-  "click==8.1.7",
-  "rich==13.9.4",
-  "yt-dlp==2025.2.19",
-  "spotdl==4.2.11",
-  "mutagen==1.47.0",
-  "requests==2.32.3",
+authors = [{ name = "Chidananda Reddy", email = "chidanandareddyjonnala.nambur@gmail.com" }]
+keywords = ["music", "downloader", "spotify", "youtube", "cli", "mp3"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Multimedia :: Sound/Audio",
 ]
+dependencies = [
+    "yt-dlp>=2024.1.0",
+    "spotdl>=4.0.0",
+    "mutagen>=1.47.0",
+    "rich>=13.0.0",
+    "click>=8.1.0",
+    "requests>=2.31.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Chidanandareddyj/grabr"
+Issues = "https://github.com/Chidanandareddyj/grabr/issues"
 
 [project.scripts]
 grabr = "grabr.cli:main"
-
-[tool.setuptools]
-include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
