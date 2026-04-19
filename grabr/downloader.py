@@ -29,7 +29,7 @@ class DownloadConfig:
     format: str = "mp3"
     output_dir: str = "~/Music/grabr"
     embed_cover: bool = True
-    download_lyrics: bool = True
+    download_lyrics: bool = False
     max_concurrent: int = 3
     retry_count: int = 1
     backoff_seconds: float = 1.5
@@ -61,6 +61,14 @@ class DependencyError(RuntimeError):
 
 
 SUPPORTED_FORMATS = {"mp3", "flac", "opus"}
+
+
+def _emit_progress(
+    progress: ProgressCallback | None, event: str, payload: dict | None = None
+) -> None:
+    if progress is None:
+        return
+    progress(event, payload or {})
 
 
 def check_dependencies() -> None:
@@ -140,8 +148,12 @@ def _download_youtube(
     )
 
     if detected.item_type is ItemType.TRACK:
+        _emit_progress(progress, "status", {"message": "Preparing YouTube track"})
         track_result = _download_youtube_track(
-            detected.normalized_url, output_dir, config
+            detected.normalized_url,
+            output_dir,
+            config,
+            progress=progress,
         )
         _record_track_result(result, track_result)
         if progress:
@@ -150,6 +162,7 @@ def _download_youtube(
             )
         return result
 
+    _emit_progress(progress, "status", {"message": "Resolving YouTube collection"})
     collection_title, entries = _extract_youtube_collection(detected.normalized_url)
     target_output_dir = _collection_output_dir(
         output_dir,
@@ -169,6 +182,7 @@ def _download_youtube(
                 config,
                 entry.get("title"),
                 entry.get("id"),
+                progress,
             ): entry
             for entry in entries
         }
@@ -196,6 +210,7 @@ def _download_youtube_track(
     config: DownloadConfig,
     title_hint: str | None = None,
     id_hint: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> TrackResult:
     yt_dlp = importlib.import_module("yt_dlp")
     track = TrackResult(source_url=url, title=title_hint)
@@ -206,11 +221,37 @@ def _download_youtube_track(
             output_dir.glob(f"*[{video_id}].{config.format}"), reverse=True
         )
         if existing:
+            _emit_progress(
+                progress,
+                "background",
+                {"message": f"Skipped existing file for video id {video_id}"},
+            )
             track.status = "skipped"
             track.file_path = str(existing[0])
             return track
 
     downloaded_info: dict | None = None
+    last_bucket = -1
+
+    def _on_yt_progress(data: dict) -> None:
+        nonlocal last_bucket
+        status = str(data.get("status") or "")
+        if status == "downloading":
+            downloaded = data.get("downloaded_bytes")
+            total = data.get("total_bytes") or data.get("total_bytes_estimate")
+            if isinstance(downloaded, (int, float)) and isinstance(total, (int, float)):
+                if total > 0:
+                    percent = int((float(downloaded) / float(total)) * 100)
+                    bucket = percent // 10
+                    if bucket > last_bucket:
+                        last_bucket = bucket
+                        _emit_progress(
+                            progress,
+                            "status",
+                            {"message": f"Downloading audio ({min(percent, 100)}%)"},
+                        )
+        elif status == "finished":
+            _emit_progress(progress, "status", {"message": "Converting and tagging"})
 
     def _run_download(include_lyrics: bool) -> None:
         nonlocal downloaded_info
@@ -228,6 +269,7 @@ def _download_youtube_track(
             ],
             "quiet": True,
             "no_warnings": True,
+            "progress_hooks": [_on_yt_progress],
         }
         if config.embed_cover:
             ydl_opts["postprocessors"].append({"key": "EmbedThumbnail"})
@@ -242,6 +284,7 @@ def _download_youtube_track(
             downloaded_info = info if isinstance(info, dict) else None
 
     try:
+        _emit_progress(progress, "status", {"message": "Starting YouTube download"})
         with_retry(
             lambda: _run_download(config.download_lyrics),
             retries=config.retry_count,
@@ -255,6 +298,11 @@ def _download_youtube_track(
             or "unable to download" in message
         )
         if config.download_lyrics and subtitle_issue:
+            _emit_progress(
+                progress,
+                "background",
+                {"message": "Subtitle fetch hit rate-limit, retrying without lyrics"},
+            )
             try:
                 with_retry(
                     lambda: _run_download(False),
@@ -274,6 +322,7 @@ def _download_youtube_track(
         track.title = downloaded_info.get("title") or track.title
         video_id = downloaded_info.get("id") or video_id
 
+    _emit_progress(progress, "status", {"message": "Finalizing output file"})
     candidates = sorted(output_dir.glob(f"*.{config.format}"), reverse=True)
     matching = [
         candidate for candidate in candidates if f"[{video_id}]" in candidate.name
@@ -341,6 +390,7 @@ def _download_spotify(
 
     if progress:
         progress("playlist_start", {"total": 1})
+    _emit_progress(progress, "status", {"message": "Preparing Spotify download"})
 
     output_template = str(output_dir / "{title} - {artists}.{output-ext}")
     cmd = [
@@ -366,9 +416,35 @@ def _download_spotify(
 
     before = {str(path.resolve()) for path in output_dir.rglob(f"*.{config.format}")}
 
+    def _spotdl_stream_line(line: str) -> None:
+        lowered = line.lower()
+        if "rate/request limit" in lowered or "retry will occur after" in lowered:
+            _emit_progress(progress, "background", {"message": line})
+            return
+        if "downloading" in lowered or "[download]" in lowered:
+            _emit_progress(progress, "status", {"message": "Downloading audio"})
+            return
+        if "ffmpeg" in lowered or "converting" in lowered:
+            _emit_progress(progress, "status", {"message": "Converting and tagging"})
+            return
+        if "spotify" in lowered and "fetch" in lowered:
+            _emit_progress(
+                progress,
+                "status",
+                {"message": "Resolving Spotify metadata"},
+            )
+            return
+        if "error" in lowered or "warning" in lowered:
+            _emit_progress(progress, "background", {"message": line})
+
     try:
+        _emit_progress(progress, "status", {"message": "Running spotdl"})
         with_retry(
-            lambda: _run_stream_command_checked(cmd, "spotdl download"),
+            lambda: _run_stream_command_checked(
+                cmd,
+                "spotdl download",
+                on_line=_spotdl_stream_line,
+            ),
             retries=config.retry_count,
             backoff_seconds=config.backoff_seconds,
         )
@@ -384,6 +460,7 @@ def _download_spotify(
                     spotify_url=detected.normalized_url,
                     output_dir=output_dir,
                     config=config,
+                    progress=progress,
                 )
                 _record_track_result(result, track)
                 if progress:
@@ -507,14 +584,23 @@ def _download_spotify_track_via_youtube(
     spotify_url: str,
     output_dir: Path,
     config: DownloadConfig,
+    progress: ProgressCallback | None = None,
 ) -> TrackResult:
+    _emit_progress(
+        progress,
+        "background",
+        {"message": "Spotify rate-limited, switching to YouTube fallback"},
+    )
+    _emit_progress(progress, "status", {"message": "Resolving Spotify metadata"})
     query = _spotify_oembed_track_query(spotify_url)
+    _emit_progress(progress, "status", {"message": "Searching YouTube match"})
     youtube_url, youtube_title = _youtube_first_result_url(query)
     track = _download_youtube_track(
         url=youtube_url,
         output_dir=output_dir,
         config=config,
         title_hint=youtube_title,
+        progress=progress,
     )
     track.source_url = spotify_url
     return track
@@ -583,7 +669,11 @@ def _youtube_first_result_url(query: str) -> tuple[str, str | None]:
     raise RuntimeError("Could not resolve a YouTube URL from fallback search result.")
 
 
-def _run_stream_command_checked(command: list[str], context: str) -> None:
+def _run_stream_command_checked(
+    command: list[str],
+    context: str,
+    on_line: Callable[[str], None] | None = None,
+) -> None:
     tail: deque[str] = deque(maxlen=12)
 
     class _RateLimitDetected(RuntimeError):
@@ -593,6 +683,8 @@ def _run_stream_command_checked(command: list[str], context: str) -> None:
         line = line.strip()
         if line:
             tail.append(line)
+            if on_line is not None:
+                on_line(line)
         lowered = line.lower()
         if "retry will occur after" in lowered or "rate/request limit" in lowered:
             raise _RateLimitDetected(line)

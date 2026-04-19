@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grabr"
-version = "0.1.1"
+version = "0.1.2"
 description = "Download music from YouTube Music and Spotify via CLI"
 readme = "README.md"
 requires-python = ">=3.10"

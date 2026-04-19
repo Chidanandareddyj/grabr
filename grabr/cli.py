@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 import click
 from rich.console import Console
-from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 
 from . import __version__
@@ -31,6 +42,11 @@ def _render_summary(result: DownloadResult) -> None:
     if result.errors:
         for error in result.errors[:5]:
             console.print(f"[red]- {error}[/red]")
+
+
+def _console_safe(text: str) -> str:
+    encoding = getattr(console.file, "encoding", None) or "utf-8"
+    return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
 
 
 def _prompt_selection(result_count: int) -> int | None:
@@ -78,8 +94,8 @@ def _run_search(
     for idx, result in enumerate(results, start=1):
         table.add_row(
             str(idx),
-            result["title"],
-            result["artist"],
+            _console_safe(result["title"]),
+            _console_safe(result["artist"]),
             result["duration_str"],
         )
     console.print(table)
@@ -113,15 +129,38 @@ def _run_download(
 
     total_tracks = 1
     completed = 0
+    recent_events: deque[str] = deque(maxlen=3)
 
     with Progress(
+        SpinnerColumn(style="bright_cyan"),
         TextColumn("[bold cyan]{task.description}"),
-        BarColumn(bar_width=40),
-        TextColumn("{task.completed}/{task.total}"),
+        BarColumn(bar_width=32),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TextColumn("[dim]{task.fields[status]}"),
+        TextColumn("[dim]{task.fields[events]}"),
         TimeElapsedColumn(),
+        TimeRemainingColumn(),
         console=console,
+        expand=True,
+        refresh_per_second=10,
     ) as progress_bar:
-        task_id = progress_bar.add_task("Downloading", total=total_tracks)
+        task_id = progress_bar.add_task(
+            "Downloading",
+            total=total_tracks,
+            status="initializing",
+            events="",
+        )
+
+        def _set_event(message: str) -> None:
+            text = " ".join(str(message).split())
+            if not text:
+                return
+            if len(text) > 96:
+                text = text[:93].rstrip() + "..."
+            recent_events.append(text)
+            timeline = "  |  ".join(recent_events)
+            progress_bar.update(task_id, events=f"events: {timeline}")
 
         def on_progress(event: str, payload: dict) -> None:
             nonlocal total_tracks, completed
@@ -131,11 +170,22 @@ def _run_download(
             elif event == "track_done":
                 completed = int(payload.get("completed", completed + 1))
                 title = payload.get("title") or "track"
+                status = payload.get("status") or "done"
                 progress_bar.update(
                     task_id,
                     completed=min(completed, total_tracks),
                     description=f"Downloading: {title}",
+                    status=f"{status}",
                 )
+                _set_event(f"Track finished: {title} ({status})")
+            elif event == "status":
+                message = str(payload.get("message") or "").strip()
+                if message:
+                    progress_bar.update(task_id, status=message)
+            elif event == "background":
+                message = str(payload.get("message") or "").strip()
+                if message:
+                    _set_event(message)
 
         try:
             result = download(url, config, on_progress)
@@ -180,7 +230,7 @@ def _run_download(
     "--no-lyrics",
     is_flag=True,
     default=False,
-    help="Skip lyric/caption sidecar downloads.",
+    help="Disable lyric/caption sidecars.",
 )
 @click.option(
     "--source",
